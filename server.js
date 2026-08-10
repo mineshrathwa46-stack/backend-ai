@@ -151,6 +151,7 @@ IMPORTANT RULES:
           // Anything else (e.g. bad API key), stop immediately.
           const status = openRouterResponse.status;
           if (status !== 404 && status !== 429) {
+            console.log("response",openRouterResponse.status);
             return res.status(status).json({
               error: "AI analysis failed",
               details: json.error?.message || "Unknown OpenRouter error",
