@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 5000;
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: "https://ai-chatbot-eta-five-22.vercel.app",
     credentials: true,
   })
 );
