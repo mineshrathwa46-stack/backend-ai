@@ -5,26 +5,43 @@ const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 
+const { adminAuth } = require("./config/firebaseAdmin");
+
 const app = express();
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// ======================================================
+// MIDDLEWARE
+// ======================================================
+
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    credentials: true,
+  })
+);
+
 app.use(express.json());
+
+// ======================================================
+// UPLOAD
+// ======================================================
 
 const upload = multer({
   dest: "uploads/",
 });
 
-// OpenRouter is OpenAI-compatible, so we just call its REST endpoint
-// directly with fetch (built into Node 18+) instead of needing an SDK.
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+// ======================================================
+// OPENROUTER
+// ======================================================
 
-// Free vision-capable models on OpenRouter (checked live, Aug 2026).
-// Free model availability changes often — if all of these ever 404/disappear,
-// check https://openrouter.ai/models?fmt=cards&order=newest&max_price=0
-// and filter by "Vision" capability, then update this list.
+const OPENROUTER_API_KEY =
+  process.env.OPENROUTER_API_KEY;
+
+const OPENROUTER_URL =
+  "https://openrouter.ai/api/v1/chat/completions";
+
 const MODELS = [
   "google/gemma-4-31b-it:free",
   "google/gemma-4-26b-a4b-it:free",
@@ -32,43 +49,163 @@ const MODELS = [
   "meta-llama/llama-3.2-11b-vision-instruct:free",
 ];
 
+// ======================================================
+// HOME
+// ======================================================
+
 app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "VisionAI Backend Running",
     provider: "OpenRouter",
+    firebaseAuth: true,
   });
 });
+
+// ======================================================
+// FIREBASE GOOGLE LOGIN
+// ======================================================
+
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    const { id_token: idToken } = req.body;
+
+    console.log("");
+    console.log("=================================");
+    console.log("🔐 GOOGLE LOGIN REQUEST");
+    console.log("Token received:", !!idToken);
+    console.log("=================================");
+
+    // ----------------------------------------------
+    // TOKEN CHECK
+    // ----------------------------------------------
+
+    if (!idToken) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing Firebase ID token",
+      });
+    }
+
+    // ----------------------------------------------
+    // VERIFY FIREBASE TOKEN
+    // ----------------------------------------------
+
+    const decodedToken =
+      await adminAuth.verifyIdToken(idToken);
+
+    console.log("✅ Firebase token verified");
+
+    console.log({
+      uid: decodedToken.uid,
+      email: decodedToken.email,
+      name: decodedToken.name,
+    });
+
+    // ----------------------------------------------
+    // RESPONSE
+    // ----------------------------------------------
+
+    return res.status(200).json({
+      success: true,
+      message: "Google login successful",
+
+      user: {
+        id: decodedToken.uid,
+
+        name:
+          decodedToken.name ||
+          decodedToken.email?.split("@")[0] ||
+          "",
+
+        email:
+          decodedToken.email || "",
+
+        picture:
+          decodedToken.picture || "",
+
+        email_verified:
+          decodedToken.email_verified || false,
+      },
+    });
+
+  } catch (error) {
+    console.error("");
+    console.error(
+      "❌ FIREBASE GOOGLE AUTH FAILED"
+    );
+    console.error("Message:", error.message);
+    console.error("Code:", error.code);
+    console.error("");
+
+    return res.status(401).json({
+      success: false,
+      error: "Firebase token verification failed",
+      details: error.message,
+    });
+  }
+});
+
+// ======================================================
+// AI IMAGE ANALYSIS
+// ======================================================
 
 app.post(
   "/api/analyze",
   upload.single("image"),
+
   async (req, res) => {
     let filePath = null;
 
     try {
+      // ----------------------------------------------
+      // IMAGE CHECK
+      // ----------------------------------------------
+
       if (!req.file) {
         return res.status(400).json({
+          success: false,
           error: "Image is required",
         });
       }
 
+      // ----------------------------------------------
+      // API KEY CHECK
+      // ----------------------------------------------
+
       if (!OPENROUTER_API_KEY) {
         return res.status(500).json({
-          error: "Missing OPENROUTER_API_KEY in .env",
+          success: false,
+          error:
+            "Missing OPENROUTER_API_KEY in .env",
         });
       }
 
       filePath = req.file.path;
 
+      // ----------------------------------------------
+      // QUESTION
+      // ----------------------------------------------
+
       const question =
         req.body.question?.trim() ||
         "Briefly describe what you can see in this image.";
 
-      const base64Image =
-        fs.readFileSync(filePath).toString("base64");
+      // ----------------------------------------------
+      // READ IMAGE
+      // ----------------------------------------------
 
-      const dataUrl = `data:${req.file.mimetype};base64,${base64Image}`;
+      const base64Image =
+        fs
+          .readFileSync(filePath)
+          .toString("base64");
+
+      const dataUrl =
+        `data:${req.file.mimetype};base64,${base64Image}`;
+
+      // ----------------------------------------------
+      // SYSTEM PROMPT
+      // ----------------------------------------------
 
       const systemPrompt = `
 You are VisionAI, a natural real-time visual assistant.
@@ -76,6 +213,7 @@ You are VisionAI, a natural real-time visual assistant.
 You are talking directly to the user through a camera.
 
 IMPORTANT RULES:
+
 - Never start your response with "This image shows".
 - Never say "The image".
 - Talk naturally as if you are looking through the user's camera.
@@ -86,22 +224,30 @@ IMPORTANT RULES:
 - If the user asks "What do you see?", directly describe the visible scene.
 - If the user asks about an object, identify it directly.
 - If something is unclear, say that it is unclear.
-`.trim();
+      `.trim();
+
+      // ----------------------------------------------
+      // MESSAGES
+      // ----------------------------------------------
 
       const messages = [
         {
           role: "system",
           content: systemPrompt,
         },
+
         {
           role: "user",
+
           content: [
             {
               type: "text",
               text: question,
             },
+
             {
               type: "image_url",
+
               image_url: {
                 url: dataUrl,
               },
@@ -114,102 +260,253 @@ IMPORTANT RULES:
       let usedModel = null;
       let lastError = null;
 
-      // Try each free model in order. Free models get pulled/renamed
-      // often, and the shared free pool can be rate-limited or flaky
-      // under load, so if one 404s, 429s, or the network hiccups,
-      // fall through to the next model instead of failing outright.
+      // ----------------------------------------------
+      // TRY MODELS
+      // ----------------------------------------------
+
       for (const model of MODELS) {
         try {
-          const openRouterResponse = await fetch(OPENROUTER_URL, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-              // Optional but recommended by OpenRouter for free-tier routing/analytics:
-              "HTTP-Referer": "http://localhost:5000",
-              "X-Title": "VisionAI",
-            },
-            body: JSON.stringify({
-              model,
-              messages,
-            }),
-          });
+          console.log(
+            `🤖 Trying model: ${model}`
+          );
 
-          const json = await openRouterResponse.json();
+          const response = await fetch(
+            OPENROUTER_URL,
+            {
+              method: "POST",
 
-          if (openRouterResponse.ok) {
+              headers: {
+                "Content-Type":
+                  "application/json",
+
+                Authorization:
+                  `Bearer ${OPENROUTER_API_KEY}`,
+
+                "HTTP-Referer":
+                  "http://localhost:5173",
+
+                "X-Title":
+                  "VisionAI",
+              },
+
+              body: JSON.stringify({
+                model,
+                messages,
+              }),
+            }
+          );
+
+          const json =
+            await response.json();
+
+          // ------------------------------------------
+          // SUCCESS
+          // ------------------------------------------
+
+          if (response.ok) {
             data = json;
             usedModel = model;
-            console.log(`✅ Success with model: ${model}`);
+
+            console.log(
+              `✅ Model success: ${model}`
+            );
+
             break;
           }
 
-          console.error(`OPENROUTER ERROR (${model}):`, json);
+          // ------------------------------------------
+          // ERROR
+          // ------------------------------------------
+
+          console.error(
+            `❌ Model error (${model}):`,
+            json
+          );
+
           lastError = json;
 
-          // 404 = model gone, 429 = rate limited -> try next model.
-          // Anything else (e.g. bad API key), stop immediately.
-          const status = openRouterResponse.status;
-          if (status !== 404 && status !== 429) {
-            console.log("response",openRouterResponse.status);
-            return res.status(status).json({
-              error: "AI analysis failed",
-              details: json.error?.message || "Unknown OpenRouter error",
-            });
+          const status =
+            response.status;
+
+          // Try another free model
+          if (
+            status === 404 ||
+            status === 429
+          ) {
+            console.log(
+              "⚠️ Trying next model..."
+            );
+
+            continue;
           }
+
+          // Other error
+          return res.status(status).json({
+            success: false,
+
+            error:
+              "AI analysis failed",
+
+            details:
+              json.error?.message ||
+              "Unknown OpenRouter error",
+          });
+
         } catch (networkError) {
-          // Connection dropped / DNS blip / etc. Don't kill the whole
-          // request over one flaky attempt — just try the next model.
           console.error(
-            `NETWORK ERROR calling ${model}:`,
+            `❌ Network error (${model}):`,
             networkError.message
           );
-          lastError = { error: { message: networkError.message } };
+
+          lastError = {
+            error: {
+              message:
+                networkError.message,
+            },
+          };
         }
       }
 
+      // ----------------------------------------------
+      // NO MODEL AVAILABLE
+      // ----------------------------------------------
+
       if (!data) {
         return res.status(502).json({
-          error: "AI analysis failed",
+          success: false,
+
+          error:
+            "AI analysis failed",
+
           details:
             lastError?.error?.message ||
-            "All free models are currently unavailable or rate-limited",
+            "All free models are unavailable or rate-limited",
         });
       }
+
+      // ----------------------------------------------
+      // ANSWER
+      // ----------------------------------------------
 
       const answer =
         data.choices?.[0]?.message?.content ||
         "I could not generate an answer.";
 
-      res.json({
+      console.log("🤖 AI:", answer);
+
+      // ----------------------------------------------
+      // RESPONSE
+      // ----------------------------------------------
+
+      return res.json({
         success: true,
-        provider: "OpenRouter",
-        model: usedModel,
+
+        provider:
+          "OpenRouter",
+
+        model:
+          usedModel,
+
         answer,
       });
 
     } catch (error) {
-      console.error("OPENROUTER ERROR:", error);
+      console.error(
+        "❌ ANALYZE ERROR:",
+        error
+      );
 
-      res.status(500).json({
-        error: "AI analysis failed",
+      return res.status(500).json({
+        success: false,
+
+        error:
+          "AI analysis failed",
+
         details:
           error.message ||
-          "Unknown OpenRouter error",
+          "Unknown error",
       });
 
     } finally {
+      // ----------------------------------------------
+      // DELETE TEMP IMAGE
+      // ----------------------------------------------
+
       if (filePath) {
         try {
           fs.unlinkSync(filePath);
-        } catch {}
+        } catch (error) {
+          console.log(
+            "⚠️ Could not delete uploaded image"
+          );
+        }
       }
     }
   }
 );
 
+// ======================================================
+// 404
+// ======================================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Route not found",
+    path: req.originalUrl,
+  });
+});
+
+// ======================================================
+// ERROR HANDLER
+// ======================================================
+
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "❌ SERVER ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      error:
+        "Internal server error",
+      details:
+        error.message,
+    });
+  }
+);
+
+// ======================================================
+// START SERVER
+// ======================================================
+
 app.listen(PORT, () => {
+  console.log("");
   console.log(
-    `🚀 Backend running on http://localhost:${PORT}`
+    "======================================"
   );
+
+  console.log(
+    "🚀 VisionAI Backend Started"
+  );
+
+  console.log(
+    `🌐 http://localhost:${PORT}`
+  );
+
+  console.log(
+    "🔐 Firebase Google Auth: ENABLED"
+  );
+
+  console.log(
+    "🤖 OpenRouter Vision: ENABLED"
+  );
+
+  console.log(
+    "======================================"
+  );
+
+  console.log("");
 });
